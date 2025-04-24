@@ -91,3 +91,98 @@ int main() {
 
     return 0;
 }
+
+#include <iostream>
+#include <fstream>
+#include <cstdlib>
+#include <cuda_runtime.h>
+
+using namespace std;
+
+#define BLOCK_SIZE 16 // AES block size (128 bits)
+
+// Mock AES block "decryption" (same as encryption because it's XOR)
+__device__ void aes_decrypt_block(unsigned char* block, unsigned char* key) {
+    for (int i = 0; i < BLOCK_SIZE; i++) {
+        block[i] ^= key[i]; // XOR again to reverse
+    }
+}
+
+// CUDA kernel for AES decryption
+__global__ void AES_DecryptKernel(unsigned char* data, unsigned char* key, int numBlocks) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < numBlocks) {
+        unsigned char* block = &data[idx * BLOCK_SIZE];
+        aes_decrypt_block(block, key);
+    }
+}
+
+void decryptFile(const char* encryptedFile, const char* outputFile, const unsigned char* key) {
+    ifstream ifs(encryptedFile, ios::binary | ios::ate);
+    if (!ifs) {
+        cerr << "Cannot open encrypted file!" << endl;
+        exit(1);
+    }
+
+    streampos fileSize = ifs.tellg();
+    ifs.seekg(0, ios::beg);
+
+    size_t numBlocks = (static_cast<size_t>(fileSize) + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    unsigned char* data = new unsigned char[numBlocks * BLOCK_SIZE];
+    ifs.read(reinterpret_cast<char*>(data), fileSize);
+    ifs.close();
+
+    // Allocate device memory
+    unsigned char* d_data;
+    unsigned char* d_key;
+    cudaMalloc(&d_data, numBlocks * BLOCK_SIZE);
+    cudaMalloc(&d_key, BLOCK_SIZE);
+
+    // Copy data and key to device
+    cudaMemcpy(d_data, data, numBlocks * BLOCK_SIZE, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_key, key, BLOCK_SIZE, cudaMemcpyHostToDevice);
+
+    // Kernel launch
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (numBlocks + threadsPerBlock - 1) / threadsPerBlock;
+    AES_DecryptKernel<<<blocksPerGrid, threadsPerBlock>>>(d_data, d_key, numBlocks);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        cerr << "CUDA kernel launch failed: " << cudaGetErrorString(err) << endl;
+        exit(1);
+    }
+
+    cudaDeviceSynchronize();
+
+    // Copy result to host
+    cudaMemcpy(data, d_data, numBlocks * BLOCK_SIZE, cudaMemcpyDeviceToHost);
+
+    // Write to output file
+    ofstream ofs(outputFile, ios::binary);
+    ofs.write(reinterpret_cast<char*>(data), fileSize); // Only write original file size
+    ofs.close();
+
+    cudaFree(d_data);
+    cudaFree(d_key);
+    delete[] data;
+}
+
+int main() {
+    unsigned char key[16] = {0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
+                             0xab, 0xf7, 0x97, 0x75, 0x46, 0x38, 0x6d, 0x60};
+
+    const char* inputFile = "./novel.txt";
+    const char* encryptedFile = "./encrypted.bin";
+    const char* decryptedFile = "./decrypted.txt";
+
+    // Encrypt the file
+    encryptFile(inputFile, encryptedFile, key);
+    cout << "File encrypted successfully!" << endl;
+
+    // Decrypt the file
+    decryptFile(encryptedFile, decryptedFile, key);
+    cout << "File decrypted successfully!" << endl;
+
+    return 0;
+}
